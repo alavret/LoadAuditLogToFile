@@ -64,12 +64,12 @@ def main():
         files = [f for f in os.listdir(log_param["dir"]) if re.match(log_param["file"] + r'_[0-9]{4}\-[0-9]{2}\-[0-9]{2}\.' + settings.ext, f)]
 
         if not files:
-            logger.debug(f"No files found in {log_param["dir"]} catalog. Start full downloading data.")
+            logger.info(f"No files found in {log_param["dir"]} catalog. Start full downloading data.")
         else:
             files.sort(reverse=True)
             for file in files:
-                logger.debug(f"Check records in file {os.path.join(log_param["dir"], log_param["file"])}.")
-                with open(os.path.join(log_param["dir"], log_param["file"]), 'r', encoding="utf8") as f:
+                logger.debug(f"Check records in file {os.path.join(log_param["dir"], file)}.")
+                with open(os.path.join(log_param["dir"], file), 'r', encoding="utf8") as f:
                     for line in f:
                         existing_records.append(line.replace('\n', ''))
                 if not existing_records:
@@ -81,7 +81,8 @@ def main():
         if existing_records:
             last_record = existing_records[-1]
             date = json.loads(last_record)["date"]
-            logger.debug(f"Last record date for {log_param["label"]} logs: {date}")
+            logger.info(f"Last record date for {log_param["label"]} logs: {date}")
+            logger.info(f"Start downloading data from {log_param["label"]} audit logs.")
             if log_param["label"] == "mail":
                 records = fetch_mail_audit_logs(settings, last_date = date)
             elif log_param["label"] == "disk":
@@ -95,6 +96,8 @@ def main():
         if not records:
             logger.error(f"No records were recived from {log_param["label"]} audit logs.")
             sys.exit(EXIT_CODE)
+        else:
+            logger.info(f"{len(records)} records were recived from {log_param["label"]} audit logs.")
 
         decoded_records = [r.decode() for r in records]
         
@@ -117,7 +120,7 @@ def main():
         for date, records in separated_list.items():
             file_path = os.path.join(log_param["dir"], f"{log_param["file"]}_{date}.{settings.ext}")
             if len(records) > 0:
-                logger.debug(f"Writing {len(records)} records to {log_param["label"]} audit file {file_path}")
+                logger.info(f"Writing {len(records)} records to {log_param["label"]} audit file {file_path}")
                 with open(file_path, 'a', encoding="utf8") as f:
                     for r in sorted(records, key=lambda d: d['full_time']):
                         f.write(f"{r["data"]}\n")
@@ -202,17 +205,17 @@ def fetch_mail_audit_logs(settings: "SettingParams", last_date: str = ""):
   
     log_records = set()
     params = {}
-    params["pageSize"] = 100
-    if last_date:
-        msg_date = datetime.datetime.strptime(last_date, "%Y-%m-%dT%H:%M:%S.%fZ")
-        shifted_date = msg_date + relativedelta(minutes=-OVERLAPPED_MINITS)
-        params["afterDate"] = shifted_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-    url = f"{DEFAULT_360_API_URL}/security/v1/org/{settings.organization_id}/audit_log/mail"
-    headers = {"Authorization": f"OAuth {settings.oauth_token}"}
-    pages_count = 0
-    retries = 0
-    while True:           
-        try:
+    try:
+        params["pageSize"] = 100
+        if last_date:
+            msg_date = datetime.datetime.strptime(last_date, "%Y-%m-%dT%H:%M:%S.%fZ")
+            shifted_date = msg_date + relativedelta(minutes=-OVERLAPPED_MINITS)
+            params["afterDate"] = shifted_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = f"{DEFAULT_360_API_URL}/security/v1/org/{settings.organization_id}/audit_log/mail"
+        headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+        pages_count = 0
+        retries = 0
+        while True:           
             response = requests.get(url, headers=headers, params=params)
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during GET request: {response.status_code}. Error message: {response.text}")
@@ -241,8 +244,9 @@ def fetch_mail_audit_logs(settings: "SettingParams", last_date: str = ""):
                         params["pageSize"] = 100
                         pages_count = 0
 
-        except Exception as e:
-                logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        return []
         
     return list(log_records)[::-1]
 
@@ -250,17 +254,17 @@ def fetch_disk_audit_logs(settings: "SettingParams", last_date: str = ""):
   
     log_records = set()
     params = {}
-    params["pageSize"] = 100
-    if last_date:
-        msg_date = datetime.datetime.strptime(last_date, "%Y-%m-%dT%H:%M:%S.%fZ")
-        shifted_date = msg_date + relativedelta(minutes=-OVERLAPPED_MINITS)
-        params["afterDate"] = shifted_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-    url = f"{DEFAULT_360_API_URL}/security/v1/org/{settings.organization_id}/audit_log/disk"
-    headers = {"Authorization": f"OAuth {settings.oauth_token}"}
-    pages_count = 0
-    retries = 0
-    while True:           
-        try:
+    try:
+        params["pageSize"] = 100
+        if last_date:
+            msg_date = datetime.datetime.strptime(last_date, "%Y-%m-%dT%H:%M:%SZ")
+            shifted_date = msg_date + relativedelta(minutes=-OVERLAPPED_MINITS)
+            params["afterDate"] = shifted_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = f"{DEFAULT_360_API_URL}/security/v1/org/{settings.organization_id}/audit_log/disk"
+        headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+        pages_count = 0
+        retries = 0
+        while True:           
             response = requests.get(url, headers=headers, params=params)
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during GET request: {response.status_code}. Error message: {response.text}")
@@ -289,8 +293,9 @@ def fetch_disk_audit_logs(settings: "SettingParams", last_date: str = ""):
                         params["pageSize"] = 100
                         pages_count = 0
 
-        except Exception as e:
-                logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        return []
         
     return list(log_records)[::-1]
 

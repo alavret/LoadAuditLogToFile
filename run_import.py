@@ -61,19 +61,19 @@ def main():
     for log_param in log_params:
 
         existing_records = []  
-        files = [f for f in os.listdir(log_param["dir"]) if re.match(log_param["file"] + r'_[0-9]{4}\-[0-9]{2}\-[0-9]{2}\.' + settings.ext, f)]
+        files = [f for f in os.listdir(log_param['dir']) if re.match(log_param['file'] + r'_[0-9]{4}\-[0-9]{2}\-[0-9]{2}\.' + settings.ext, f)]
 
         if not files:
-            logger.info(f"No files found in {log_param["dir"]} catalog. Start full downloading data.")
+            logger.info(f"No files found in {log_param['dir']} catalog. Start full downloading data.")
         else:
             files.sort(reverse=True)
             for file in files:
-                logger.debug(f"Check records in file {os.path.join(log_param["dir"], file)}.")
-                with open(os.path.join(log_param["dir"], file), 'r', encoding="utf8") as f:
+                logger.debug(f"Check records in file {os.path.join(log_param['dir'], file)}.")
+                with open(os.path.join(log_param['dir'], file), 'r', encoding="utf8") as f:
                     for line in f:
                         existing_records.append(line.replace('\n', ''))
                 if not existing_records:
-                    logger.debug(f"No records found in file {os.path.join(log_param["dir"], log_param["file"])}. Selecting previous file.")
+                    logger.debug(f"No records found in file {os.path.join(log_param['dir'], log_param['file'])}. Selecting previous file.")
                 else:
                     break
 
@@ -81,8 +81,8 @@ def main():
         if existing_records:
             last_record = existing_records[-1]
             date = json.loads(last_record)["date"]
-            logger.info(f"Last record date for {log_param["label"]} logs: {date}")
-            logger.info(f"Start downloading data from {log_param["label"]} audit logs.")
+            logger.info(f"Last record date for {log_param['label']} logs: {date}")
+            logger.info(f"Start downloading data from {log_param['label']} audit logs.")
             if log_param["label"] == "mail":
                 records = fetch_mail_audit_logs(settings, last_date = date)
             elif log_param["label"] == "disk":
@@ -94,10 +94,10 @@ def main():
                 records = fetch_disk_audit_logs(settings)
 
         if not records:
-            logger.error(f"No records were recived from {log_param["label"]} audit logs.")
+            logger.error(f"No records were recived from {log_param['label']} audit logs.")
             sys.exit(EXIT_CODE)
         else:
-            logger.info(f"{len(records)} records were recived from {log_param["label"]} audit logs.")
+            logger.info(f"{len(records)} records were recived from {log_param['label']} audit logs.")
 
         decoded_records = [r.decode() for r in records]
         
@@ -118,12 +118,12 @@ def main():
                 logger.error(f"No date found in record: {r}")
         
         for date, records in separated_list.items():
-            file_path = os.path.join(log_param["dir"], f"{log_param["file"]}_{date}.{settings.ext}")
+            file_path = os.path.join(log_param['dir'], f"{log_param['file']}_{date}.{settings.ext}")
             if len(records) > 0:
-                logger.info(f"Writing {len(records)} records to {log_param["label"]} audit file {file_path}")
+                logger.info(f"Writing {len(records)} records to {log_param['label']} audit file {file_path}")
                 with open(file_path, 'a', encoding="utf8") as f:
                     for r in sorted(records, key=lambda d: d['full_time']):
-                        f.write(f"{r["data"]}\n")
+                        f.write(f"{r['data']}\n")
            
 
     logger.info("Sript finished.")

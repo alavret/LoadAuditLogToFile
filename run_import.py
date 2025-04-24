@@ -80,7 +80,7 @@ def main():
         records = []
         if existing_records:
             last_record = existing_records[-1]
-            date = json.loads(last_record)["date"]
+            date = f"{json.loads(last_record)['date'][0:19]}Z"
             logger.info(f"Last record date for {log_param['label']} logs: {date}")
             logger.info(f"Start downloading data from {log_param['label']} audit logs.")
             if log_param["label"] == "mail":
@@ -208,7 +208,7 @@ def fetch_mail_audit_logs(settings: "SettingParams", last_date: str = ""):
     try:
         params["pageSize"] = 100
         if last_date:
-            msg_date = datetime.datetime.strptime(last_date, "%Y-%m-%dT%H:%M:%S.%fZ")
+            msg_date = datetime.datetime.strptime(last_date, "%Y-%m-%dT%H:%M:%SZ")
             shifted_date = msg_date + relativedelta(minutes=-OVERLAPPED_MINITS)
             params["afterDate"] = shifted_date.strftime("%Y-%m-%dT%H:%M:%SZ")
         url = f"{DEFAULT_360_API_URL}/security/v1/org/{settings.organization_id}/audit_log/mail"

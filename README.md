@@ -1,4 +1,4 @@
-# Yandex 360 Audit Log Fetcher
+# Yandex 360 Audit Log Fetcher as JSON strings to local files
 
 ## Overview
 
@@ -47,7 +47,7 @@ The script relies on the following environment variables, which can be set in a 
 | `ORGANIZATION_ID_ARG`           | Organization ID for the Yandex 360 account (must be an integer).             | Yes      | `123456`                          |
 | `MAIL_LOG_CATALOG_LOCATION`     | Directory path for storing mail audit log files.                            | Yes      | `/path/to/mail/logs`              |
 | `DISK_LOG_CATALOG_LOCATION`     | Directory path for storing disk audit log files.                            | Yes      | `/path/to/disk/logs`              |
-| `LOG_FILE_EXTENSION`            | File extension for log files.                                               | Yes      | `log`                             |
+| `LOG_FILE_EXTENSION`            | File extension for log files.                                               | Yes      | `json`                             |
 | `MAIL_LOG_FILE_BASE_NAME`       | Base name for mail audit log files (before date and extension).             | Yes      | `mail_audit`                      |
 | `DISK_LOG_FILE_BASE_NAME`       | Base name for disk audit log files (before date and extension).             | Yes      | `disk_audit`                      |
 
@@ -60,7 +60,7 @@ The script relies on the following environment variables, which can be set in a 
   ORGANIZATION_ID_ARG=123456
   MAIL_LOG_CATALOG_LOCATION=/path/to/mail/logs
   DISK_LOG_CATALOG_LOCATION=/path/to/disk/logs
-  LOG_FILE_EXTENSION=log
+  LOG_FILE_EXTENSION=json
   MAIL_LOG_FILE_BASE_NAME=mail_audit
   DISK_LOG_FILE_BASE_NAME=disk_audit
   ```
@@ -117,7 +117,7 @@ Click "Login as" and receive the required access token.
      - Load settings and validate them.
      - Check for existing log files in the specified directories.
      - Fetch new audit logs for mail and disk events.
-     - Write new records to date-based files (e.g., `mail_audit_2023-10-01.log`).
+     - Write new records to date-based files (e.g., `mail_audit_2023-10-01.json`).
 
 3. **Output**:
    - Log files are created or appended in the specified directories.
@@ -152,10 +152,10 @@ pip install python-dotenv requests python-dateutil
 
 1. **Initial Run**:
    - No existing log files → Fetches all available audit logs for mail and disk.
-   - Creates files like `mail_audit_2023-10-01.log` and `disk_audit_2023-10-01.log`.
+   - Creates files like `mail_audit_2023-10-01.json` and `disk_audit_2023-10-01.json`.
 
 2. **Subsequent Runs**:
-   - Finds the most recent log file (e.g., `mail_audit_2023-10-01.log`).
+   - Finds the most recent log file (e.g., `mail_audit_2023-10-01.json`).
    - Extracts the last record’s date (e.g., `2023-10-01T12:00:00Z`).
    - Fetches new records from `2023-10-01T11:58:00Z` (2-minute overlap).
    - Appends new records to existing files or creates new ones for new dates.

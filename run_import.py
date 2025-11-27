@@ -96,47 +96,52 @@ def main():
 
 def fetch_and_save_old_logs_controller(settings: "SettingParams", runtime_data: "RuntimeData", last_datetime: str, label: str):
 
-    fmt = '%Y-%m-%dT%H:%M:%SZ'
-    exit_while = False
-    while True:
-        diff_in_minutes = (datetime.now() + relativedelta(hours=-settings.timezone_shift) - datetime.strptime(last_datetime, fmt)).total_seconds() / 60
-        if diff_in_minutes > OLD_LOG_ONE_FETCH_CYCLE_IN_MINUTES:
-            ended_at = datetime.strptime(last_datetime, fmt) + relativedelta(minutes=+OLD_LOG_ONE_FETCH_CYCLE_IN_MINUTES)
-        else:
-            ended_at = datetime.now() + relativedelta(hours=-settings.timezone_shift)
-            exit_while = True
+    try:
+        fmt = '%Y-%m-%dT%H:%M:%SZ'
+        exit_while = False
+        while True:
+            diff_in_minutes = (datetime.now() + relativedelta(hours=-settings.timezone_shift) - datetime.strptime(last_datetime, fmt)).total_seconds() / 60
+            if diff_in_minutes > OLD_LOG_ONE_FETCH_CYCLE_IN_MINUTES:
+                ended_at = datetime.strptime(last_datetime, fmt) + relativedelta(minutes=+OLD_LOG_ONE_FETCH_CYCLE_IN_MINUTES)
+            else:
+                ended_at = datetime.now() + relativedelta(hours=-settings.timezone_shift)
+                exit_while = True
 
-        str_ended_at = ended_at.strftime(fmt)
-        logger.info(f"Start downloading data from {label} audit logs from {last_datetime} to {str_ended_at}.")
-        if label == "mail":
-            error, records = fetch_mail_audit_logs(settings, last_datetime, str_ended_at)
-        elif label == "disk":
-            error, records = fetch_disk_audit_logs(settings, last_datetime, str_ended_at)
+            str_ended_at = ended_at.strftime(fmt)
+            logger.info(f"Start downloading data from {label} audit logs from {last_datetime} to {str_ended_at}.")
+            if label == "mail":
+                error, records = fetch_mail_audit_logs(settings, last_datetime, str_ended_at)
+            elif label == "disk":
+                error, records = fetch_disk_audit_logs(settings, last_datetime, str_ended_at)
 
-        if error:
-            logger.error(f"Error occured during reciving records from {label} audit logs from {last_datetime} to {str_ended_at}. Force quite cycle.")
-            break
+            if error:
+                logger.error(f"Error occured during reciving records from {label} audit logs from {last_datetime} to {str_ended_at}. Force quite cycle.")
+                break
 
-        if not records:
-            logger.error(f"No records were recived from {label} audit logs from {last_datetime} to {str_ended_at}.")
-        else:
-            logger.info(f"{len(records)} records were recived from {label} audit logs from {last_datetime} to {str_ended_at}.")
-            decoded_records = [r.decode() for r in records]
-            save_old_logs_to_file(settings, label, decoded_records, runtime_data)
-            json_records = [json.loads(r) for r in decoded_records]
-            new_last_records = []
-            sorted_records = sorted(json_records, key=lambda x: x["date"], reverse=True)
-            sugested_date = sorted_records[0]["date"][0:19]
-            for record in sorted_records:
-                if record["date"][0:19] == sugested_date:
-                    new_last_records.append(json.dumps(record, ensure_ascii=False).encode('utf8').decode())
-                else:
-                    break
-            runtime_data.last_records[label] = new_last_records
+            if not records:
+                logger.error(f"No records were recived from {label} audit logs from {last_datetime} to {str_ended_at}.")
+            else:
+                logger.info(f"{len(records)} records were recived from {label} audit logs from {last_datetime} to {str_ended_at}.")
+                decoded_records = [r.decode() for r in records]
+                save_old_logs_to_file(settings, label, decoded_records, runtime_data)
+                json_records = [json.loads(r) for r in decoded_records]
+                new_last_records = []
+                sorted_records = sorted(json_records, key=lambda x: x["date"], reverse=True)
+                sugested_date = sorted_records[0]["date"][0:19]
+                for record in sorted_records:
+                    if record["date"][0:19] == sugested_date:
+                        new_last_records.append(json.dumps(record, ensure_ascii=False).encode('utf8').decode())
+                    else:
+                        break
+                runtime_data.last_records[label] = new_last_records
 
-        last_datetime = str_ended_at
-        if exit_while:
-            break
+            last_datetime = str_ended_at
+            if exit_while:
+                break
+
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        return
            
 
 def get_date_of_last_record(settings: "SettingParams", runtime_data: "RuntimeData", log_source):
@@ -187,7 +192,7 @@ def get_date_of_last_record(settings: "SettingParams", runtime_data: "RuntimeDat
         existing_records = runtime_data.last_records[log_source]
         last_record = existing_records[0]
         if log_source == "mail" or log_source == "disk":
-                date = f"{json.loads(last_record)['date'][0:19]}Z"
+            date = f"{json.loads(last_record)['date'][0:19]}Z"
         elif log_source == "all":
             date = f"{json.loads(last_record)['event']['occurred_at'][0:19]}Z"
 
@@ -536,46 +541,50 @@ def fetch_all_audit_logs_by_params(settings: "SettingParams", query_params: dict
 
 def fetch_and_save_new_logs_controller(settings: "SettingParams", runtime_data: "RuntimeData", last_datetime : str = ""):
 
-    fmt = '%Y-%m-%dT%H:%M:%SZ'
-    params = {}
-    
-    params["started_at"] = last_datetime
-    logger.info(f"Started new log download process from {params['started_at']}")
-
-    exit_while = False
-
-    while True:
-        diff_in_minutes = (datetime.now() + relativedelta(hours=-settings.timezone_shift) - datetime.strptime(last_datetime, fmt)).total_seconds() / 60
-        if diff_in_minutes > NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES:
-            ended_at = datetime.strptime(last_datetime, fmt) + relativedelta(minutes=+NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES)
-        else:
-            ended_at = datetime.now() + relativedelta(hours=-settings.timezone_shift)
-            exit_while = True
-        params["ended_at"] = ended_at.strftime(fmt)
-        logger.info(f"Fetch new logs cycle from {params['started_at']} to {params['ended_at']}")
-        error, log_records = fetch_all_audit_logs_by_params(settings, params)
-        if error:
-            logger.error(f"Error occured during reciving records from new audit logs from  {params['started_at']} to {params['ended_at']}. Force quite cycle.")
-            break
-        if log_records:
-            logger.info(f'Received {len(log_records)} records, from {log_records[-1]["event"]["occurred_at"][0:19]} to {log_records[0]["event"]["occurred_at"][0:19]}')
-            save_new_logs_to_file(log_records, settings, runtime_data)
-            sorted_log_records = sorted(log_records, key=lambda d: d["event"]["occurred_at"], reverse=True)
-            last_datetime = f'{sorted_log_records[0]["event"]["occurred_at"][0:19]}Z'
-            new_last_records = []
-            for r in sorted_log_records:
-                if f'{r["event"]["occurred_at"][0:19]}Z' == last_datetime:
-                    new_last_records.append(r) 
-                else:
-                    break 
-            runtime_data.last_records["all"] = new_last_records
-            shifted_datetime = datetime.strptime(last_datetime, fmt) + relativedelta(seconds=-1)
-            params["started_at"] = shifted_datetime.strftime(fmt)
-        else:
-            break
+    try:
+        fmt = '%Y-%m-%dT%H:%M:%SZ'
+        params = {}
         
-        if exit_while:
-            break
+        params["started_at"] = last_datetime
+        logger.info(f"Started new log download process from {params['started_at']}")
+
+        exit_while = False
+
+        while True:
+            diff_in_minutes = (datetime.now() + relativedelta(hours=-settings.timezone_shift) - datetime.strptime(last_datetime, fmt)).total_seconds() / 60
+            if diff_in_minutes > NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES:
+                ended_at = datetime.strptime(last_datetime, fmt) + relativedelta(minutes=+NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES)
+            else:
+                ended_at = datetime.now() + relativedelta(hours=-settings.timezone_shift)
+                exit_while = True
+            params["ended_at"] = ended_at.strftime(fmt)
+            logger.info(f"Fetch new logs cycle from {params['started_at']} to {params['ended_at']}")
+            error, log_records = fetch_all_audit_logs_by_params(settings, params)
+            if error:
+                logger.error(f"Error occured during reciving records from new audit logs from  {params['started_at']} to {params['ended_at']}. Force quite cycle.")
+                break
+            if log_records:
+                logger.info(f'Received {len(log_records)} records, from {log_records[-1]["event"]["occurred_at"][0:19]} to {log_records[0]["event"]["occurred_at"][0:19]}')
+                save_new_logs_to_file(log_records, settings, runtime_data)
+                sorted_log_records = sorted(log_records, key=lambda d: d["event"]["occurred_at"], reverse=True)
+                last_datetime = f'{sorted_log_records[0]["event"]["occurred_at"][0:19]}Z'
+                new_last_records = []
+                for r in sorted_log_records:
+                    if f'{r["event"]["occurred_at"][0:19]}Z' == last_datetime:
+                        new_last_records.append(json.dumps(r, ensure_ascii=False).encode('utf8').decode()) 
+                    else:
+                        break 
+                runtime_data.last_records["all"] = new_last_records
+                shifted_datetime = datetime.strptime(last_datetime, fmt) + relativedelta(seconds=-1)
+                params["started_at"] = shifted_datetime.strftime(fmt)
+            else:
+                break
+            
+            if exit_while:
+                break
+
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
 def save_new_logs_to_file(log_records: list, settings: "SettingParams", runtime_data: "RuntimeData"):
     result = False

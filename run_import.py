@@ -340,7 +340,7 @@ def fetch_mail_audit_logs(settings: "SettingParams", last_date: str = "", ended_
                 else:
                     logger.error("Forcing exit without getting data.")
                     error = True
-                    return []
+                    return error, []
             else:
                 retries = 1
                 temp_list = response.json()["events"]
@@ -374,7 +374,7 @@ def fetch_mail_audit_logs(settings: "SettingParams", last_date: str = "", ended_
     except Exception as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
         error = True
-        return []
+        return error, []
         
     return error, log_records
 
@@ -408,7 +408,7 @@ def fetch_disk_audit_logs(settings: "SettingParams", last_date: str = "", ended_
                 else:
                     logger.error("Forcing exit without getting data.")
                     error = True
-                    return []
+                    return error, []
             else:
                 retries = 1
                 temp_list = response.json()["events"]
@@ -442,7 +442,7 @@ def fetch_disk_audit_logs(settings: "SettingParams", last_date: str = "", ended_
     except Exception as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
         error = True
-        return []
+        return error, []
         
     return error, log_records
 
@@ -551,9 +551,9 @@ def fetch_and_save_new_logs_controller(settings: "SettingParams", runtime_data: 
         exit_while = False
 
         while True:
-            diff_in_minutes = (datetime.now() + relativedelta(hours=-settings.timezone_shift) - datetime.strptime(last_datetime, fmt)).total_seconds() / 60
+            diff_in_minutes = (datetime.now() + relativedelta(hours=-settings.timezone_shift) - datetime.strptime(params["started_at"], fmt)).total_seconds() / 60
             if diff_in_minutes > NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES:
-                ended_at = datetime.strptime(last_datetime, fmt) + relativedelta(minutes=+NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES)
+                ended_at = datetime.strptime(params["started_at"], fmt) + relativedelta(minutes=+NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES)
             else:
                 ended_at = datetime.now() + relativedelta(hours=-settings.timezone_shift)
                 exit_while = True
@@ -576,6 +576,10 @@ def fetch_and_save_new_logs_controller(settings: "SettingParams", runtime_data: 
                         break 
                 runtime_data.last_records["all"] = new_last_records
                 shifted_datetime = datetime.strptime(last_datetime, fmt) + relativedelta(seconds=-1)
+                params["started_at"] = shifted_datetime.strftime(fmt)
+            elif log_records == []:
+                logger.info(f"No new logs received for period from {params['started_at']} to {params['ended_at']}. Next turn.")
+                shifted_datetime = ended_at + relativedelta(seconds=-1)
                 params["started_at"] = shifted_datetime.strftime(fmt)
             else:
                 break

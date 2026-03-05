@@ -364,7 +364,7 @@ def fetch_mail_audit_logs(settings: "SettingParams", last_date: str = "", ended_
                             shifted_date = msg_date + relativedelta(seconds=OVERLAPPED_SECONDS)
                             params["beforeDate"] = shifted_date.strftime("%Y-%m-%dT%H:%M:%SZ")
                         else:
-                            logger.error("No data returned from API request. Exit from cycle.")
+                            logger.info("No data returned from API request. Exit from cycle.")
                             logger.debug(f"Data for GET request: url - {url}. Params - {params}")
                             logger.debug(f'X-Request-Id: {response.headers.get("X-Request-Id","")}')
                             break
@@ -432,7 +432,7 @@ def fetch_disk_audit_logs(settings: "SettingParams", last_date: str = "", ended_
                             shifted_date = msg_date + relativedelta(seconds=OVERLAPPED_SECONDS)
                             params["beforeDate"] = shifted_date.strftime("%Y-%m-%dT%H:%M:%SZ")
                         else:
-                            logger.error("No data returned from API request. Exit from cycle.")
+                            logger.info("No data returned from API request. Exit from cycle.")
                             logger.debug(f"Data for GET request: url - {url}. Params - {params}")
                             logger.debug(f'X-Request-Id: {response.headers.get("X-Request-Id","")}')
                             break

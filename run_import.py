@@ -12,6 +12,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from http import HTTPStatus
 import time
+import traceback
 
 DEFAULT_360_API_URL = "https://api360.yandex.net"
 NEW_360_API_URL = "https://cloud-api.yandex.net/v1"
@@ -30,7 +31,7 @@ MAX_RETRIES = 3
 RETRIES_DELAY_SEC = 2
 
 # Цикл запроса логов
-SLEEP_MINITS_AFTER_LAST_FETCH = 10
+SLEEP_MINITS_AFTER_LAST_FETCH = 1
 
 # Количество дней в прошлое для запроса логов, если нет никакой истории выгрузки
 MAX_DAYS_AGO_FOR_API_CALLS = 90
@@ -49,7 +50,7 @@ MAIL_LOGS_MAX_RECORDS = 100
 DISK_LOGS_MAX_RECORDS = 100
 
 # !!! Don't change values in LOGS_NAMES list !!!
-LOGS_SOURCES = ["mail", "disk", "all"]
+LOGS_SOURCES = ["mail", "all"]
 
 
 EXIT_CODE = 1
@@ -72,7 +73,7 @@ def main():
     logger.info("Starting script...")
 
     settings = get_settings()
-    runtime_data = RuntimeData(last_records={"mail": [], "disk": [], "all": []})
+    runtime_data = RuntimeData(last_records={"mail": [], "all": []}, oldest_datetime={"mail": None, "all": None})
 
     if settings is None:
         logger.error("Settings are not set.")
@@ -80,7 +81,6 @@ def main():
 
     logger.info("Constants in this run:")
     logger.info(f"MAIL_LOGS_MAX_RECORDS: {MAIL_LOGS_MAX_RECORDS}")
-    logger.info(f"DISK_LOGS_MAX_RECORDS: {DISK_LOGS_MAX_RECORDS}")
     logger.info(f"ALL_LOGS_MAX_RECORDS: {ALL_LOGS_MAX_RECORDS}")
     logger.info(f"NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES: {NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES}")
     logger.info(f"OLD_LOG_ONE_FETCH_CYCLE_IN_MINUTES: {OLD_LOG_ONE_FETCH_CYCLE_IN_MINUTES}")
@@ -94,55 +94,83 @@ def main():
     download_sсheduler(settings, runtime_data)
     
 
-def fetch_and_save_old_logs_controller(settings: "SettingParams", runtime_data: "RuntimeData", last_datetime: str, label: str):
+def fetch_and_save_old_logs_controller(settings: "SettingParams", runtime_data: "RuntimeData", oldest_datetime: str, label: str):
 
     try:
-        fmt = '%Y-%m-%dT%H:%M:%SZ'
+        fmt = '%Y-%m-%dT%H:%M:%S.%fZ'
+        parsed_oldest = _parse_utc_datetime(oldest_datetime)
+        new_started_at = parsed_oldest + relativedelta(microseconds=+100)
+        logger.info(f"Started mail audit logs download process from {new_started_at.strftime(fmt)}")
+
+        progress_start_dt = _parse_utc_datetime(oldest_datetime)
+        progress_end_dt = datetime.now() + relativedelta(hours=-settings.timezone_shift)
+        print_progress_bar(progress_start_dt, progress_start_dt, progress_end_dt)
+
         exit_while = False
         while True:
-            diff_in_minutes = (datetime.now() + relativedelta(hours=-settings.timezone_shift) - datetime.strptime(last_datetime, fmt)).total_seconds() / 60
-            if diff_in_minutes > OLD_LOG_ONE_FETCH_CYCLE_IN_MINUTES:
-                ended_at = datetime.strptime(last_datetime, fmt) + relativedelta(minutes=+OLD_LOG_ONE_FETCH_CYCLE_IN_MINUTES)
+
+            parsed_oldest = _parse_utc_datetime(oldest_datetime)
+            new_started_at = parsed_oldest + relativedelta(microseconds=+1000)
+            last_datetime = new_started_at.strftime(fmt)
+
+            diff_in_minutes = (datetime.now() + relativedelta(hours=-settings.timezone_shift) - parsed_oldest).total_seconds() / 60
+            if diff_in_minutes > NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES:
+                ended_at = parsed_oldest + relativedelta(minutes=+NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES)
             else:
                 ended_at = datetime.now() + relativedelta(hours=-settings.timezone_shift)
                 exit_while = True
-
             str_ended_at = ended_at.strftime(fmt)
-            logger.info(f"Start downloading data from {label} audit logs from {last_datetime} to {str_ended_at}.")
+
+            logger.debug(f"Start downloading data from {label} audit logs from {last_datetime} to {str_ended_at}.")
             if label == "mail":
                 error, records = fetch_mail_audit_logs(settings, last_datetime, str_ended_at)
-            elif label == "disk":
-                error, records = fetch_disk_audit_logs(settings, last_datetime, str_ended_at)
 
             if error:
                 logger.error(f"Error occured during reciving records from {label} audit logs from {last_datetime} to {str_ended_at}. Force quite cycle.")
                 break
 
-            if not records:
-                logger.error(f"No records were recived from {label} audit logs from {last_datetime} to {str_ended_at}.")
-            else:
-                logger.info(f"{len(records)} records were recived from {label} audit logs from {last_datetime} to {str_ended_at}.")
+            if records:
+                #logger.info(f"{len(records)} records were recived from {label} audit logs from {last_datetime} to {str_ended_at}.")
                 decoded_records = [r.decode() for r in records]
                 save_old_logs_to_file(settings, label, decoded_records, runtime_data)
                 json_records = [json.loads(r) for r in decoded_records]
-                new_last_records = []
                 sorted_records = sorted(json_records, key=lambda x: x["date"], reverse=True)
-                sugested_date = sorted_records[0]["date"][0:19]
-                for record in sorted_records:
-                    if record["date"][0:19] == sugested_date:
-                        new_last_records.append(json.dumps(record, ensure_ascii=False).encode('utf8').decode())
-                    else:
-                        break
-                runtime_data.last_records[label] = new_last_records
+                occurred_at_raw = sorted_records[0]["date"]
+                match = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)", occurred_at_raw)
+                if match:
+                    suggested_date = match.group(1)
+                else:
+                    logger.warning(f"Could not parse occurred_at field: {occurred_at_raw}")
+                    suggested_date = occurred_at_raw[:19]  # fallback, though не гарантия что корректно
 
-            last_datetime = str_ended_at
+                # Если дата последнего события в полученных событиях совпадает до секунды с конечной датой,
+                # то используем дату последнего события в полученных событиях, иначе используем конечную дату
+                if suggested_date[:19] ==   str_ended_at[:19]:
+                    oldest_datetime = f"{suggested_date}Z"
+                else:
+                    oldest_datetime = str_ended_at
+
+            elif records == []:
+                #logger.debug(f"No new logs received for period from {last_datetime} to {str_ended_at}. Next turn.")
+                oldest_datetime = str_ended_at
+            else:
+                break
+
+            print_progress_bar(progress_start_dt, ended_at, progress_end_dt)
+            runtime_data.oldest_datetime["mail"] = oldest_datetime
+
             if exit_while:
                 break
 
+        print_progress_bar(progress_start_dt, progress_end_dt, progress_end_dt)
+        sys.stdout.write('\n')
+        sys.stdout.flush()
+
     except Exception as e:
+        sys.stdout.write('\n')
+        sys.stdout.flush()
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
-        return
-           
+
 
 def get_date_of_last_record(settings: "SettingParams", runtime_data: "RuntimeData", log_source):
 
@@ -150,7 +178,7 @@ def get_date_of_last_record(settings: "SettingParams", runtime_data: "RuntimeDat
     date_now = datetime.now() + relativedelta(hours=-settings.timezone_shift)
     date = (date_now + relativedelta(days=-MAX_DAYS_AGO_FOR_API_CALLS)).strftime(fmt)
     existing_records = []
-    if runtime_data.last_records is None or not runtime_data.last_records[log_source]:
+    if runtime_data.oldest_datetime[log_source] is None:
         all_files = Path(settings.dir_paths[log_source]).glob(f"*.{settings.ext}")
         all_names = (file_path.name.lower() for file_path in all_files)
         files = [f for f in all_names if re.match(settings.file_names[log_source] + r'_[0-9]{4}\-[0-9]{2}\-[0-9]{2}\.' + settings.ext, f)]
@@ -169,32 +197,22 @@ def get_date_of_last_record(settings: "SettingParams", runtime_data: "RuntimeDat
                 else:
                     temp_list = [json.loads(r) for r in existing_records]
                     if log_source == "mail" or log_source == "disk":
-                        suggested_date = temp_list[-1]["date"][0:19]
+                        occurred_at_raw = temp_list[-1]["date"][0:19]
                     else:
-                        suggested_date = temp_list[-1]['event']['occurred_at'][0:19]
-                    new_last_records = []
-                    for record in temp_list[::-1]:
-                        if log_source == "mail" or log_source == "disk":
-                            if record["date"][0:19] == suggested_date:
-                                new_last_records.append(json.dumps(record, ensure_ascii=False).encode('utf8').decode())
-                            else:
-                                break
-                        else:
-                            if record['event']['occurred_at'][0:19] == suggested_date:
-                                new_last_records.append(record)
-                            else:
-                                break
-                    runtime_data.last_records[log_source] = new_last_records
+                        occurred_at_raw = temp_list[-1]['event']['occurred_at']
+                    # Поддержка разных форматов строки времени: YYYY-MM-DDTHH:MM:SS[.microseconds]
+                    match = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)", occurred_at_raw)
+                    if match:
+                        suggested_date = match.group(1)
+                    else:
+                        logger.warning(f"Could not parse occurred_at field: {occurred_at_raw}")
+                        suggested_date = occurred_at_raw[:19]  # fallback, though не гарантия что корректно
+                    runtime_data.oldest_datetime[log_source] = suggested_date
                     date = f"{suggested_date}Z"
                     break
 
     else:
-        existing_records = runtime_data.last_records[log_source]
-        last_record = existing_records[0]
-        if log_source == "mail" or log_source == "disk":
-            date = f"{json.loads(last_record)['date'][0:19]}Z"
-        elif log_source == "all":
-            date = f"{json.loads(last_record)['event']['occurred_at'][0:19]}Z"
+        date =runtime_data.oldest_datetime[log_source]
 
     logger.info(f"Last record date for {log_source} logs: {date}")
     
@@ -212,6 +230,7 @@ class SettingParams:
 @dataclass
 class RuntimeData:
     last_records: dict = None
+    oldest_datetime: str = None
 
 def get_settings():
     exit_flag = False
@@ -248,18 +267,6 @@ def get_settings():
             print(f"!!! ERROR !!! The path '{mail_dir_path}' is not a directory. Exit.")
             exit_flag = True
 
-    disk_dir_path = Path(os.environ.get("DISK_LOG_CATALOG_LOCATION"))
-    if not disk_dir_path:
-        logger.error("DISK_LOG_CATALOG_LOCATION is not set")
-        exit_flag = True
-    else:
-        if not disk_dir_path.exists:
-            print(f"!!! ERROR !!! The path '{disk_dir_path}' does not exist. Check path and letter case. Exit.")
-            exit_flag = True
-        if not disk_dir_path.is_dir():
-            print(f"!!! ERROR !!! The path '{disk_dir_path}' is not a directory. Exit.")
-            exit_flag = True
-
     all_dir_path = Path(os.environ.get("NEW_LOG_CATALOG_LOCATION"))
     if not all_dir_path:
         logger.error("NEW_LOG_CATALOG_LOCATION is not set")
@@ -277,7 +284,6 @@ def get_settings():
         exit_flag = True
     
     mail_file_name = os.environ.get("MAIL_LOG_FILE_BASE_NAME")
-    disk_file_name = os.environ.get("DISK_LOG_FILE_BASE_NAME")
     all_file_name = os.environ.get("NEW_LOG_FILE_BASE_NAME")
 
     temp_timezone_shift = int(os.environ.get("TIMEZONE_SHIFT_IN_HOURS"))
@@ -291,19 +297,15 @@ def get_settings():
         return None
     
     settings.dir_paths["mail"] = mail_dir_path
-    settings.dir_paths["disk"] = disk_dir_path
     settings.dir_paths["all"] = all_dir_path
 
     settings.file_names["mail"] = mail_file_name
-    settings.file_names["disk"] = disk_file_name
     settings.file_names["all"] = all_file_name
 
     logger.info(f"Settings: ORGANIZATION_ID_ARG - {settings.organization_id}")
     logger.info(f"Settings: MAIL_LOG_CATALOG_LOCATION - {settings.dir_paths['mail']}")
-    logger.info(f"Settings: DISK_LOG_CATALOG_LOCATION - {settings.dir_paths['disk']}")
     logger.info(f"Settings: NEW_LOG_CATALOG_LOCATION - {settings.dir_paths['all']}")
     logger.info(f"Settings: MAIL_LOG_FILE_BASE_NAME - {settings.file_names['mail']}")
-    logger.info(f"Settings: DISK_LOG_FILE_BASE_NAME - {settings.file_names['disk']}")
     logger.info(f"Settings: NEW_LOG_FILE_BASE_NAME - {settings.file_names['all']}")
     logger.info(f"Settings: LOG_FILE_EXTENSION - {settings.ext}")
     logger.info(f"Settings: TIMEZONE_SHIFT_IN_HOURS - {settings.timezone_shift}")
@@ -315,14 +317,13 @@ def fetch_mail_audit_logs(settings: "SettingParams", last_date: str = "", ended_
     log_records = set()
     params = {}
     error = False
+    fmt = '%Y-%m-%dT%H:%M:%S.%fZ'
     try:
         params["pageSize"] = MAIL_LOGS_MAX_RECORDS
         if last_date:
             params["afterDate"] = last_date
         if ended_at:
-            msg_date = datetime.strptime(ended_at, "%Y-%m-%dT%H:%M:%SZ")
-            shifted_date = msg_date + relativedelta(seconds=OVERLAPPED_SECONDS)
-            params["beforeDate"] = shifted_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+            params["beforeDate"] = ended_at
         url = f"{DEFAULT_360_API_URL}/security/v1/org/{settings.organization_id}/audit_log/mail"
         headers = {"Authorization": f"OAuth {settings.oauth_token}"}
         pages_count = 0
@@ -342,34 +343,45 @@ def fetch_mail_audit_logs(settings: "SettingParams", last_date: str = "", ended_
                     error = True
                     return error, []
             else:
-                retries = 1
-                temp_list = response.json()["events"]
-                sorted_list = sorted(temp_list, key=lambda x: x["date"], reverse=True)
-                if temp_list:
-                    logger.debug(f'Received {len(sorted_list)} records, from {sorted_list[-1]["date"]} to {sorted_list[0]["date"]}')
-                    temp_json = [json.dumps(d, ensure_ascii=False).encode('utf8') for d in sorted_list]
-                    log_records.update(temp_json)
-                
-                if response.json()["nextPageToken"] == "":
-                    break
-                else:
-                    if pages_count < OLD_LOG_MAX_PAGES:
-                        pages_count += 1
-                        params["pageToken"] = response.json()["nextPageToken"]
+                if response.json()["events"] is not None and response.json()["events"] != []:
+                    retries = 1
+                    temp_list = response.json()["events"]
+                    sorted_list = sorted(temp_list, key=lambda x: x["date"], reverse=True)
+                    if temp_list:
+                        logger.debug(f'Received {len(sorted_list)} records, from {sorted_list[-1]["date"]} to {sorted_list[0]["date"]}')
+                        temp_json = [json.dumps(d, ensure_ascii=False).encode('utf8') for d in sorted_list]
+                        log_records.update(temp_json)
+                    
+                    if response.json()["nextPageToken"] == "":
+                        break
                     else:
-                        if params.get('pageToken') : del params['pageToken']
-                        if temp_list:
-                            sugested_date = sorted_list[-1]["date"][0:19] + "Z"
-                            msg_date = datetime.strptime(sugested_date, "%Y-%m-%dT%H:%M:%SZ")
-                            shifted_date = msg_date + relativedelta(seconds=OVERLAPPED_SECONDS)
-                            params["beforeDate"] = shifted_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+                        if pages_count < OLD_LOG_MAX_PAGES:
+                            pages_count += 1
+                            params["pageToken"] = response.json()["nextPageToken"]
                         else:
-                            logger.info("No data returned from API request. Exit from cycle.")
-                            logger.debug(f"Data for GET request: url - {url}. Params - {params}")
-                            logger.debug(f'X-Request-Id: {response.headers.get("X-Request-Id","")}')
-                            break
-                        params["pageSize"] = 100
-                        pages_count = 0
+                            if params.get('pageToken') : del params['pageToken']
+                            if temp_list:
+                                occurred_at_raw = sorted_list[-1]["date"]
+                                match = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)", occurred_at_raw)
+                                if match:
+                                    suggested_date = match.group(1)
+                                else:
+                                    logger.warning(f"Could not parse occurred_at field: {occurred_at_raw}")
+                                    suggested_date = occurred_at_raw[:19]  # fallback, though не гарантия что корректно
+
+                                suggested_date = f'{suggested_date}Z'
+                                msg_date = datetime.strptime(suggested_date, fmt) + relativedelta(microsecond=-1000)
+                                params["beforeDate"] = msg_date.strftime(fmt)
+                            else:
+                                logger.debug("No data returned from API request. Exit from cycle.")
+                                logger.debug(f"Data for GET request: url - {url}. Params - {params}")
+                                logger.debug(f'X-Request-Id: {response.headers.get("X-Request-Id","")}')
+                                break
+                            params["pageSize"] = 100
+                            pages_count = 0
+                elif response.json()["events"] == []:
+                    logger.debug("API returned empty list of events. Exit from cycle.")
+                    return False, []
 
     except Exception as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
@@ -378,73 +390,6 @@ def fetch_mail_audit_logs(settings: "SettingParams", last_date: str = "", ended_
         
     return error, log_records
 
-def fetch_disk_audit_logs(settings: "SettingParams", last_date: str = "", ended_at: str = ""):
-    error = False
-    log_records = set()
-    params = {}
-    try:
-        params["pageSize"] = DISK_LOGS_MAX_RECORDS
-        if last_date:
-            params["afterDate"] = last_date
-        if ended_at:
-            msg_date = datetime.strptime(ended_at, "%Y-%m-%dT%H:%M:%SZ")
-            shifted_date = msg_date + relativedelta(seconds=OVERLAPPED_SECONDS)
-            params["beforeDate"] = shifted_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-        url = f"{DEFAULT_360_API_URL}/security/v1/org/{settings.organization_id}/audit_log/disk"
-        headers = {"Authorization": f"OAuth {settings.oauth_token}"}
-        pages_count = 0
-        retries = 0
-
-        while True:           
-            response = requests.get(url, headers=headers, params=params)
-            if response.status_code != HTTPStatus.OK.value:
-                logger.error(f"Error during GET request: {response.status_code}. Error message: {response.text}")
-                logger.debug(f"Error during GET request. url - {url}. Params - {params}")
-                logger.debug(f'X-Request-Id: {response.headers.get("X-Request-Id","")}')
-                if retries < MAX_RETRIES:
-                    logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
-                    time.sleep(RETRIES_DELAY_SEC * retries)
-                    retries += 1
-                else:
-                    logger.error("Forcing exit without getting data.")
-                    error = True
-                    return error, []
-            else:
-                retries = 1
-                temp_list = response.json()["events"]
-                sorted_list = sorted(temp_list, key=lambda x: x["date"], reverse=True)
-                if temp_list:
-                    logger.debug(f'Received {len(sorted_list)} records, from {sorted_list[-1]["date"]} to {sorted_list[0]["date"]}')
-                    temp_json = [json.dumps(d, ensure_ascii=False).encode('utf8') for d in sorted_list]
-                    log_records.update(temp_json)
-                
-                if response.json()["nextPageToken"] == "":
-                    break
-                else:
-                    if pages_count < OLD_LOG_MAX_PAGES:
-                        pages_count += 1
-                        params["pageToken"] = response.json()["nextPageToken"]
-                    else:
-                        if params.get('pageToken') : del params['pageToken']
-                        if temp_list:
-                            sugested_date = sorted_list[-1]["date"][0:19] + "Z"
-                            msg_date = datetime.strptime(sugested_date, "%Y-%m-%dT%H:%M:%SZ")
-                            shifted_date = msg_date + relativedelta(seconds=OVERLAPPED_SECONDS)
-                            params["beforeDate"] = shifted_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-                        else:
-                            logger.info("No data returned from API request. Exit from cycle.")
-                            logger.debug(f"Data for GET request: url - {url}. Params - {params}")
-                            logger.debug(f'X-Request-Id: {response.headers.get("X-Request-Id","")}')
-                            break
-                        params["pageSize"] = 100
-                        pages_count = 0
-
-    except Exception as e:
-        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
-        error = True
-        return error, []
-        
-    return error, log_records
 
 def save_old_logs_to_file(settings: "SettingParams", label: str, log_records: list, runtime_data: "RuntimeData" ):
 
@@ -478,7 +423,7 @@ def save_old_logs_to_file(settings: "SettingParams", label: str, log_records: li
     for date, records in separated_list.items():
         file_path = os.path.join(settings.dir_paths[label], f"{settings.file_names[label]}_{date}.{settings.ext}")
         if len(records) > 0:
-            logger.info(f"Writing {len(records)} records to {label} audit file {file_path}")
+            logger.debug(f"Writing {len(records)} records to {label} audit file {file_path}")
             try:
                 with open(file_path, 'a', encoding="utf8") as f:
                     for r in sorted(records, key=lambda d: d['full_time']):
@@ -523,7 +468,7 @@ def fetch_all_audit_logs_by_params(settings: "SettingParams", query_params: dict
                     logger.debug(f'Received {len(temp_list)} records, from {sorted_list[-1]["event"]["occurred_at"][0:19]} to {sorted_list[0]["event"]["occurred_at"][0:19]}')
                     log_records.extend(temp_list)
                 else:
-                    logger.info("No data returned from API request.")
+                    logger.debug("No data returned from API request.")
                     logger.debug(f"Data for GET request: url - {url}. Params - {params}")
                     logger.debug(f"Received data: {response.json()}")
 
@@ -539,56 +484,107 @@ def fetch_all_audit_logs_by_params(settings: "SettingParams", query_params: dict
         
     return error, log_records
 
-def fetch_and_save_new_logs_controller(settings: "SettingParams", runtime_data: "RuntimeData", last_datetime : str = ""):
+def print_progress_bar(start_dt, current_dt, end_dt, bar_length=40):
+    total_seconds = (end_dt - start_dt).total_seconds()
+    if total_seconds <= 0:
+        progress = 1.0
+    else:
+        elapsed_seconds = (current_dt - start_dt).total_seconds()
+        progress = min(max(elapsed_seconds / total_seconds, 0.0), 1.0)
+
+    filled = int(bar_length * progress)
+    bar = '█' * filled + '░' * (bar_length - filled)
+    percent = progress * 100
+
+    sys.stdout.write(
+        f'\r[{bar}] {percent:5.1f}% | '
+        f'{current_dt.strftime("%Y-%m-%d %H:%M")} / {end_dt.strftime("%Y-%m-%d %H:%M")}'
+    )
+    sys.stdout.flush()
+
+
+def _parse_utc_datetime(dt_str):
+    if isinstance(dt_str, datetime):
+        return dt_str
+    for f in ('%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%SZ'):
+        try:
+            return datetime.strptime(dt_str, f)
+        except ValueError:
+            continue
+    raise ValueError(f"Could not parse datetime string: {dt_str}")
+
+def fetch_and_save_new_logs_controller(settings: "SettingParams", runtime_data: "RuntimeData", oldest_datetime : str = ""):
 
     try:
-        fmt = '%Y-%m-%dT%H:%M:%SZ'
+        fmt = '%Y-%m-%dT%H:%M:%S.%fZ'
         params = {}
-        
-        params["started_at"] = last_datetime
-        logger.info(f"Started new log download process from {params['started_at']}")
-
+        parsed_oldest = _parse_utc_datetime(oldest_datetime)
+        new_started_at = parsed_oldest + relativedelta(microseconds=+1)
+        logger.info(f"Started new log download process from {new_started_at.strftime(fmt)}")
         exit_while = False
 
+        progress_start_dt = _parse_utc_datetime(oldest_datetime)
+        progress_end_dt = datetime.now() + relativedelta(hours=-settings.timezone_shift)
+        print_progress_bar(progress_start_dt, progress_start_dt, progress_end_dt)
+
         while True:
-            diff_in_minutes = (datetime.now() + relativedelta(hours=-settings.timezone_shift) - datetime.strptime(last_datetime, fmt)).total_seconds() / 60
+            #Добавляем микросекунду, т.к. в API запрос для начальной даты учитывет микросекунды
+            parsed_oldest = _parse_utc_datetime(oldest_datetime)
+            new_started_at = parsed_oldest + relativedelta(microseconds=+1)
+            params["started_at"] = new_started_at.strftime(fmt)
+
+            diff_in_minutes = (datetime.now() + relativedelta(hours=-settings.timezone_shift) - parsed_oldest).total_seconds() / 60
             if diff_in_minutes > NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES:
-                ended_at = datetime.strptime(last_datetime, fmt) + relativedelta(minutes=+NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES)
+                ended_at = parsed_oldest + relativedelta(minutes=+NEW_LOG_ONE_FETCH_CYCLE_IN_MINUTES)
             else:
                 ended_at = datetime.now() + relativedelta(hours=-settings.timezone_shift)
                 exit_while = True
             params["ended_at"] = ended_at.strftime(fmt)
-            logger.info(f"Fetch new logs cycle from {params['started_at']} to {params['ended_at']}")
+            logger.debug(f"Fetch new logs cycle from {params['started_at']} to {params['ended_at']}")
             error, log_records = fetch_all_audit_logs_by_params(settings, params)
             if error:
                 logger.error(f"Error occured during reciving records from new audit logs from  {params['started_at']} to {params['ended_at']}. Force quite cycle.")
                 break
             if log_records:
-                logger.info(f'Received {len(log_records)} records, from {log_records[-1]["event"]["occurred_at"][0:19]} to {log_records[0]["event"]["occurred_at"][0:19]}')
+                #logger.debug(f'Received {len(log_records)} records, from {log_records[-1]["event"]["occurred_at"][0:19]} to {log_records[0]["event"]["occurred_at"][0:19]}')
                 save_new_logs_to_file(log_records, settings, runtime_data)
                 sorted_log_records = sorted(log_records, key=lambda d: d["event"]["occurred_at"], reverse=True)
-                last_datetime = f'{sorted_log_records[0]["event"]["occurred_at"][0:19]}Z'
-                new_last_records = []
-                for r in sorted_log_records:
-                    if f'{r["event"]["occurred_at"][0:19]}Z' == last_datetime:
-                        new_last_records.append(json.dumps(r, ensure_ascii=False).encode('utf8').decode()) 
-                    else:
-                        break 
-                runtime_data.last_records["all"] = new_last_records
-                shifted_datetime = datetime.strptime(last_datetime, fmt) + relativedelta(seconds=1)
-                params["started_at"] = shifted_datetime.strftime(fmt)
+                occurred_at_raw = sorted_log_records[0]["event"]["occurred_at"]
+                match = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)", occurred_at_raw)
+                if match:
+                    suggested_date = match.group(1)
+                else:
+                    logger.warning(f"Could not parse occurred_at field: {occurred_at_raw}")
+                    suggested_date = occurred_at_raw[:19]  # fallback, though не гарантия что корректно
+                
+                occurred_at_zero_milliseconds = f"{suggested_date[:19]}Z"
+                # Сравнение нужно для того, чтобы понять, какую дату нужно использовать для следующего запроса
+                # Если дата последнего запроса совпадает посекундно (микросекунды не учитываются) с датой последнего события в ответе,
+                # то используем дату последнего события (с микросекундами), иначе используем дату окончания текущего запроса
+                if occurred_at_zero_milliseconds == params["ended_at"]:
+                    oldest_datetime = f"{suggested_date}Z"
+                else:
+                    oldest_datetime = ended_at.strftime(fmt)
+                
             elif log_records == []:
-                logger.info(f"No new logs received for period from {params['started_at']} to {params['ended_at']}. Next turn.")
-                shifted_datetime = ended_at + relativedelta(seconds=1)
-                params["started_at"] = shifted_datetime.strftime(fmt)
-                last_datetime = shifted_datetime.strftime(fmt)
+                logger.debug(f"No new logs received for period from {params['started_at']} to {params['ended_at']}. Next turn.")
+                oldest_datetime = ended_at.strftime(fmt)
             else:
                 break
-            
+
+            print_progress_bar(progress_start_dt, ended_at, progress_end_dt)
+            runtime_data.oldest_datetime["all"] = oldest_datetime
+
             if exit_while:
                 break
 
+        print_progress_bar(progress_start_dt, progress_end_dt, progress_end_dt)
+        sys.stdout.write('\n')
+        sys.stdout.flush()
+
     except Exception as e:
+        sys.stdout.write('\n')
+        sys.stdout.flush()
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
 def save_new_logs_to_file(log_records: list, settings: "SettingParams", runtime_data: "RuntimeData"):
@@ -610,7 +606,7 @@ def save_new_logs_to_file(log_records: list, settings: "SettingParams", runtime_
     for date, records in separated_list.items():
         file_path = os.path.join(settings.dir_paths["all"], f'{settings.file_names["all"]}_{date}.{settings.ext}')
         if len(records) > 0:
-            logger.info(f"Writing {len(records)} records of new audit log format logs to file {file_path}")
+            logger.debug(f"Writing {len(records)} records of new audit log format logs to file {file_path}")
             try:
                 with open(file_path, 'a', encoding="utf8") as f:
                     for r in sorted(records, key=lambda d: d["full_time"]):
@@ -620,6 +616,7 @@ def save_new_logs_to_file(log_records: list, settings: "SettingParams", runtime_
                 logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
     return result
+
 def download_sсheduler(settings: "SettingParams", runtime_data: "RuntimeData"):
     while True:
         for log_source in LOGS_SOURCES:
@@ -628,13 +625,9 @@ def download_sсheduler(settings: "SettingParams", runtime_data: "RuntimeData"):
                 fetch_and_save_new_logs_controller(settings, runtime_data, last_datetime)
             elif log_source == "mail":
                 fetch_and_save_old_logs_controller(settings, runtime_data, last_datetime, "mail")
-            elif log_source == "disk":
-                fetch_and_save_old_logs_controller(settings, runtime_data, last_datetime, "disk")
 
         logger.info(f"Start sleeping for {SLEEP_MINITS_AFTER_LAST_FETCH} minutes.")
         time.sleep(SLEEP_MINITS_AFTER_LAST_FETCH * 60)
-
-
 
 if __name__ == "__main__":
 
@@ -645,10 +638,14 @@ if __name__ == "__main__":
 
     try:
         main()
-
     except KeyboardInterrupt:
-        logger.info("Ctrl+C pressed. Exiting.")
+        logger.info("\nCtrl+C pressed. До свидания!")
         sys.exit(EXIT_CODE)
-    except Exception as e:
-        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+    except Exception as exc:
+        tb = traceback.extract_tb(exc.__traceback__)
+        last_frame = tb[-1] if tb else None
+        if last_frame:
+            logger.error(f"{type(exc).__name__} at {last_frame.filename}:{last_frame.lineno} in {last_frame.name}: {exc}")
+        else:
+            logger.error(f"{type(exc).__name__}: {exc}")
         sys.exit(EXIT_CODE)

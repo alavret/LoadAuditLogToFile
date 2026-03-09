@@ -31,7 +31,7 @@ MAX_RETRIES = 3
 RETRIES_DELAY_SEC = 2
 
 # Цикл запроса логов
-SLEEP_MINITS_AFTER_LAST_FETCH = 1
+SLEEP_MINITS_AFTER_LAST_FETCH = 15
 
 # Количество дней в прошлое для запроса логов, если нет никакой истории выгрузки
 MAX_DAYS_AGO_FOR_API_CALLS = 90

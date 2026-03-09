@@ -370,7 +370,7 @@ def fetch_mail_audit_logs(settings: "SettingParams", last_date: str = "", ended_
                                     suggested_date = occurred_at_raw[:19]  # fallback, though не гарантия что корректно
 
                                 suggested_date = f'{suggested_date}Z'
-                                msg_date = datetime.strptime(suggested_date, fmt) + relativedelta(microsecond=-1000)
+                                msg_date = datetime.strptime(suggested_date, fmt) + relativedelta(microseconds=-1000)
                                 params["beforeDate"] = msg_date.strftime(fmt)
                             else:
                                 logger.debug("No data returned from API request. Exit from cycle.")
